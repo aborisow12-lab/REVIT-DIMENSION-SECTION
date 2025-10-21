@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Auto-offset dimension texts on Sections - v1.0 Section-specific version"""
+"""Auto-offset dimension texts on Sections - v1.1 Section-specific version
+FIXED: Improved collision detection and perpendicular offset calculation for sections"""
 
-__title__ = 'Align S-Dimension\nSections v1.0'
+__title__ = 'Align S-Dimension\nSections v1.1'
 __author__ = 'AB Scripts'
 
 from Autodesk.Revit.DB import *
@@ -353,55 +354,96 @@ def collect_segments(dimension):
     return segs
 
 def get_dimension_orientation(segments_info, view):
-    """Determine if dimension is horizontal or vertical - works for Plan and Section"""
+    """Determine if dimension is horizontal or vertical - works for Plan and Section
+    Returns: (orientation_string, dimension_direction_vector, perpendicular_offset_vector)"""
     if len(segments_info) < 2:
         print("  WARNING: Less than 2 segments, using default horizontal")
         return "horizontal", XYZ(1, 0, 0), XYZ(0, 0, 1)
-    
+
     a = segments_info[0]['text_pos']
     b = segments_info[-1]['text_pos']
-    
+
+    # Calculate dimension direction vector
+    dim_vector = (b - a).Normalize()
+
     delta_x = abs(b.X - a.X)
     delta_y = abs(b.Y - a.Y)
     delta_z = abs(b.Z - a.Z)
-    
+
     print("  First segment: X={:.4f} Y={:.4f} Z={:.4f}".format(a.X, a.Y, a.Z))
     print("  Last segment:  X={:.4f} Y={:.4f} Z={:.4f}".format(b.X, b.Y, b.Z))
     print("  Delta X: {:.4f}, Y: {:.4f}, Z: {:.4f}".format(delta_x, delta_y, delta_z))
-    
+    print("  Dim vector: X={:.4f} Y={:.4f} Z={:.4f}".format(dim_vector.X, dim_vector.Y, dim_vector.Z))
+
     # Find the largest delta to determine direction
     max_delta = max(delta_x, delta_y, delta_z)
-    
+
     if max_delta < 0.001:
         print("  WARNING: All deltas near zero, using default")
         return "horizontal", XYZ(1, 0, 0), XYZ(0, 0, 1)
-    
+
     if view.ViewType == ViewType.Section:
-        # For sections in Revit:
-        # - Dimension line can go along Y (vertical on screen) or X (horizontal on screen)
-        # - Leader offset should go PERPENDICULAR to dimension and AWAY from view (typically +X or +Z)
-        
-        # Determine which axis has the largest change
-        if delta_y > delta_x and delta_y > delta_z:
-            # Vertical dimension (Y direction) on section
-            # Leader offset should go UP (Z) on the screen
-            print("  Detected: VERTICAL dimension (Y direction in section plane)")
-            dim_dir = XYZ(0, 1, 0)  # Y axis - dimension direction
-            perp = XYZ(0, 0, 1)     # Z axis - UPWARD offset for leaders
-            return "vertical", dim_dir, perp
-        elif delta_x > delta_y and delta_x > delta_z:
-            # Horizontal dimension (X direction) on section
-            # Leader offset should go UP (Z) on the screen
-            print("  Detected: HORIZONTAL dimension (X direction)")
-            dim_dir = XYZ(1, 0, 0)  # X axis - dimension direction
-            perp = XYZ(0, 0, 1)     # Z axis - UPWARD offset for leaders
-            return "horizontal", dim_dir, perp
-        else:
-            # Delta Z is largest - unusual case
-            print("  Detected: Z-direction dimension")
-            dim_dir = XYZ(0, 0, 1)  # Z axis
-            perp = XYZ(1, 0, 0)     # X axis (perpendicular)
-            return "vertical", dim_dir, perp
+        # CRITICAL FIX: Use view's coordinate system
+        # ViewDirection points INTO the section (perpendicular to section plane)
+        # UpDirection points UP on the screen
+        # RightDirection points RIGHT on the screen
+
+        try:
+            view_dir = view.ViewDirection.Normalize()
+            up_dir = view.UpDirection.Normalize()
+            right_dir = view.RightDirection.Normalize()
+
+            print("  View coordinate system:")
+            print("    ViewDirection (into page): ({:.4f}, {:.4f}, {:.4f})".format(view_dir.X, view_dir.Y, view_dir.Z))
+            print("    UpDirection (up on screen): ({:.4f}, {:.4f}, {:.4f})".format(up_dir.X, up_dir.Y, up_dir.Z))
+            print("    RightDirection (right on screen): ({:.4f}, {:.4f}, {:.4f})".format(right_dir.X, right_dir.Y, right_dir.Z))
+
+            # Project dimension vector onto view plane (remove view direction component)
+            dim_on_view = dim_vector - view_dir * dim_vector.DotProduct(view_dir)
+            dim_on_view = dim_on_view.Normalize()
+
+            print("  Dimension direction on view plane: ({:.4f}, {:.4f}, {:.4f})".format(
+                dim_on_view.X, dim_on_view.Y, dim_on_view.Z))
+
+            # Determine if dimension is more horizontal or vertical ON SCREEN
+            horizontal_component = abs(dim_on_view.DotProduct(right_dir))
+            vertical_component = abs(dim_on_view.DotProduct(up_dir))
+
+            print("  Horizontal component: {:.4f}, Vertical component: {:.4f}".format(
+                horizontal_component, vertical_component))
+
+            # Calculate perpendicular direction IN VIEW PLANE
+            # For a dimension going right, perpendicular is up
+            # For a dimension going up, perpendicular is right
+            if horizontal_component > vertical_component:
+                # Dimension is more horizontal on screen
+                orientation = "horizontal"
+                # Use actual dimension direction (not just X axis)
+                dim_dir = dim_vector
+                # Perpendicular is UP direction on screen
+                perp = up_dir
+                print("  Detected: HORIZONTAL dimension on section")
+                print("  Using UpDirection for perpendicular offset")
+            else:
+                # Dimension is more vertical on screen
+                orientation = "vertical"
+                dim_dir = dim_vector
+                # Perpendicular is RIGHT direction on screen
+                perp = right_dir
+                print("  Detected: VERTICAL dimension on section")
+                print("  Using RightDirection for perpendicular offset")
+
+            return orientation, dim_dir, perp
+
+        except Exception as e:
+            print("  ERROR getting view directions: {}".format(e))
+            # Fallback to old logic
+            if delta_x > delta_y and delta_x > delta_z:
+                return "horizontal", XYZ(1, 0, 0), XYZ(0, 0, 1)
+            elif delta_z > delta_x and delta_z > delta_y:
+                return "vertical", XYZ(0, 0, 1), XYZ(1, 0, 0)
+            else:
+                return "vertical", XYZ(0, 1, 0), XYZ(0, 0, 1)
     else:
         # For plans: X is horizontal, Y is vertical, Z is elevation
         if delta_x > delta_y:
@@ -1030,119 +1072,258 @@ def process_all_problems_section(problem_indices, edge_segments_moved, segs_sort
 
 def check_label_crosses_dimension_line(seg, segs_sorted, view, dim_dir, perp, textnote_type_id):
     """Check if segment label (after being moved outside) crosses back over the dimension line
-    The dimension line is where the original segment positions are
+    IMPROVED: Uses segment origins for more accurate dimension line detection
     Returns True if label crosses dimension line, False otherwise"""
-    
+
     try:
         # Create temporary TextNote to get actual bbox
-        tn = TextNote.Create(doc, view.Id, seg['segment'].TextPosition, seg['text'], textnote_type_id)
+        current_text_pos = seg['segment'].TextPosition
+        tn = TextNote.Create(doc, view.Id, current_text_pos, seg['text'], textnote_type_id)
         doc.Regenerate()
-        
+
         bbox = tn.get_BoundingBox(view)
-        
+
         # Delete temporary TextNote
         doc.Delete(tn.Id)
         doc.Regenerate()
-        
+
         if not bbox:
             return False
-        
-        # The dimension line is at the perpendicular position of the original segment positions
-        # Get the average perpendicular position of all segment origins
-        total_perp = 0.0
-        count = 0
-        
+
+        # CRITICAL FIX: Use ORIGINAL text positions from segs_sorted to find dimension line
+        # The dimension line is at the perpendicular position where segments were originally
+        # We use the median instead of average to be more robust against outliers
+
+        perp_positions = []
         for s in segs_sorted:
-            # Use the ORIGINAL text position (where dimension line is)
+            # Use the stored ORIGINAL text position
             original_pos = s['text_pos']
-            total_perp += original_pos.DotProduct(perp)
-            count += 1
-        
-        if count == 0:
+            perp_pos = original_pos.DotProduct(perp)
+            perp_positions.append(perp_pos)
+
+        if not perp_positions:
             return False
-        
-        dim_line_perp_pos = total_perp / count
-        
-        # Get bbox perpendicular range
-        bbox_min_perp = bbox.Min.DotProduct(perp)
-        bbox_max_perp = bbox.Max.DotProduct(perp)
-        
-        # Normalize so min < max
-        if bbox_min_perp > bbox_max_perp:
-            bbox_min_perp, bbox_max_perp = bbox_max_perp, bbox_min_perp
-        
-        # Check if dimension line passes through the bbox
-        crosses = bbox_min_perp <= dim_line_perp_pos <= bbox_max_perp
-        
+
+        # Use median for more robust dimension line detection
+        perp_positions_sorted = sorted(perp_positions)
+        n = len(perp_positions_sorted)
+        if n % 2 == 0:
+            dim_line_perp_pos = (perp_positions_sorted[n//2 - 1] + perp_positions_sorted[n//2]) / 2.0
+        else:
+            dim_line_perp_pos = perp_positions_sorted[n//2]
+
+        print("    Dimension line perpendicular position: {:.4f} (median of {} segments)".format(
+            dim_line_perp_pos, len(perp_positions)))
+
+        # Calculate all corners of bbox to find true perpendicular extent
+        corners = [
+            bbox.Min,
+            bbox.Max,
+            XYZ(bbox.Min.X, bbox.Min.Y, bbox.Max.Z),
+            XYZ(bbox.Min.X, bbox.Max.Y, bbox.Min.Z),
+            XYZ(bbox.Max.X, bbox.Min.Y, bbox.Min.Z),
+            XYZ(bbox.Min.X, bbox.Max.Y, bbox.Max.Z),
+            XYZ(bbox.Max.X, bbox.Min.Y, bbox.Max.Z),
+            XYZ(bbox.Max.X, bbox.Max.Y, bbox.Min.Z)
+        ]
+
+        perp_values = [corner.DotProduct(perp) for corner in corners]
+        bbox_min_perp = min(perp_values)
+        bbox_max_perp = max(perp_values)
+
+        # Add small tolerance for numerical precision
+        tolerance = 0.001  # about 1/8 inch
+
+        # Check if dimension line passes through the bbox (with tolerance)
+        crosses = (bbox_min_perp - tolerance) <= dim_line_perp_pos <= (bbox_max_perp + tolerance)
+
         if crosses:
-            print("    Seg {} crosses dimension line: bbox [{:.4f}, {:.4f}] contains {:.4f}".format(
-                seg['index'], bbox_min_perp, bbox_max_perp, dim_line_perp_pos))
-        
+            print("    *** Seg {} CROSSES dimension line ***".format(seg['index']))
+            print("        Label bbox perp range: [{:.4f}, {:.4f}]".format(bbox_min_perp, bbox_max_perp))
+            print("        Dimension line at: {:.4f}".format(dim_line_perp_pos))
+            print("        Current text position: ({:.4f}, {:.4f}, {:.4f})".format(
+                current_text_pos.X, current_text_pos.Y, current_text_pos.Z))
+
         return crosses
-        
+
     except Exception as e:
         print("    Error checking if Seg {} crosses dimension line: {}".format(seg['index'], e))
+        import traceback
+        print(traceback.format_exc())
         return False
 
 def fix_edge_collisions(segs_sorted, edge_segments_moved, dimension, view, dim_dir, perp, textnote_type_id, vertical_offset):
-    """Iteratively fix edge segments that cross back over the dimension line"""
-    
+    """Iteratively fix edge segments that cross back over the dimension line
+    IMPROVED: Uses perpendicular offset instead of parallel offset to move labels away from dimension line"""
+
     if not edge_segments_moved:
         return 0
-    
+
     print("\n--- Checking if edge segments cross dimension line ---")
-    
-    max_iterations = 10
+
+    max_iterations = 15  # Increased from 10
     fixed_count = 0
-    
+
     first_edge = segs_sorted[0]
     last_edge = segs_sorted[-1]
-    
+
     for iteration in range(max_iterations):
         has_crossing = False
-        
+
         # Check each edge segment
         for edge_seg in [first_edge, last_edge]:
             if edge_seg['index'] not in edge_segments_moved:
                 continue
-            
+
             # Check if label crosses dimension line
             if check_label_crosses_dimension_line(edge_seg, segs_sorted, view, dim_dir, perp, textnote_type_id):
                 has_crossing = True
-                
-                # Get current position and text width
+
+                # Get current position and text dimensions
                 current_pos = edge_seg['segment'].TextPosition
                 text_width = edge_seg.get('text_width', 0)
-                
-                # Calculate additional offset (30% of text width or vertical_offset, whichever is larger)
-                additional_offset = max(text_width * 0.3, vertical_offset)
-                
-                # Determine direction
-                if edge_seg['index'] == first_edge['index']:
-                    # Move further left (negative direction)
-                    new_pos = current_pos + dim_dir * (-additional_offset)
-                    direction = "LEFT"
+                text_height = edge_seg.get('text_height', 0)
+
+                # CRITICAL FIX: Calculate how far the label needs to move PERPENDICULAR to dimension line
+                # Get dimension line position
+                perp_positions = [s['text_pos'].DotProduct(perp) for s in segs_sorted]
+                perp_positions_sorted = sorted(perp_positions)
+                n = len(perp_positions_sorted)
+                if n % 2 == 0:
+                    dim_line_perp_pos = (perp_positions_sorted[n//2 - 1] + perp_positions_sorted[n//2]) / 2.0
                 else:
-                    # Move further right (positive direction)
-                    new_pos = current_pos + dim_dir * additional_offset
-                    direction = "RIGHT"
-                
+                    dim_line_perp_pos = perp_positions_sorted[n//2]
+
+                # Get current perpendicular position of the label
+                current_perp_pos = current_pos.DotProduct(perp)
+
+                # Calculate needed perpendicular offset
+                # We want the label to be at least text_height/2 + margin away from dimension line
+                margin = vertical_offset * 0.5
+                min_clearance = text_height / 2.0 + margin
+
+                # Determine which side of dimension line we want to be on
+                if current_perp_pos > dim_line_perp_pos:
+                    # Label is above dimension line, move it further up
+                    target_perp_pos = dim_line_perp_pos + min_clearance
+                    if current_perp_pos < target_perp_pos:
+                        perp_offset = target_perp_pos - current_perp_pos
+                        new_pos = current_pos + perp * perp_offset
+                        direction = "UP/OUT"
+                    else:
+                        # Already far enough, just move a bit more to be safe
+                        new_pos = current_pos + perp * (vertical_offset * 0.3)
+                        direction = "UP/OUT (safety)"
+                else:
+                    # Label is below dimension line, move it further down
+                    target_perp_pos = dim_line_perp_pos - min_clearance
+                    if current_perp_pos > target_perp_pos:
+                        perp_offset = target_perp_pos - current_perp_pos
+                        new_pos = current_pos + perp * perp_offset
+                        direction = "DOWN/OUT"
+                    else:
+                        # Already far enough, just move a bit more to be safe
+                        new_pos = current_pos - perp * (vertical_offset * 0.3)
+                        direction = "DOWN/OUT (safety)"
+
                 try:
                     edge_seg['segment'].TextPosition = new_pos
                     fixed_count += 1
-                    print("  Iteration {}: Seg {} crosses dim line - moved {} by {:.4f}".format(
-                        iteration + 1, edge_seg['index'], direction, additional_offset))
+                    print("  Iteration {}: Seg {} crosses dim line - moved {} (perp offset: {:.4f})".format(
+                        iteration + 1, edge_seg['index'], direction,
+                        abs(new_pos.DotProduct(perp) - current_perp_pos)))
+                    print("      From perp pos {:.4f} to {:.4f} (dim line at {:.4f})".format(
+                        current_perp_pos, new_pos.DotProduct(perp), dim_line_perp_pos))
                 except Exception as e:
                     print("  ERROR fixing Seg {}: {}".format(edge_seg['index'], e))
-        
+
         if not has_crossing:
-            print("  No edge segments crossing dimension line after {} iterations".format(iteration))
+            print("  No edge segments crossing dimension line after {} iterations".format(iteration + 1))
             break
-    
+
+        # Regenerate after each iteration to get updated positions
+        doc.Regenerate()
+
     if has_crossing:
         print("  WARNING: Edge segments still crossing after {} iterations".format(max_iterations))
-    
+
     return fixed_count
+
+def fix_all_segment_collisions(segs_sorted, view, dim_dir, perp, textnote_type_id, vertical_offset):
+    """Check ALL segments for collisions with dimension line and fix them
+    This is a final pass to catch any segments that might cross the dimension line"""
+
+    print("\n--- Final collision check for ALL segments ---")
+
+    max_iterations = 10
+    total_fixed = 0
+
+    for iteration in range(max_iterations):
+        colliding_segments = []
+
+        # Check all segments
+        for seg in segs_sorted:
+            if check_label_crosses_dimension_line(seg, segs_sorted, view, dim_dir, perp, textnote_type_id):
+                colliding_segments.append(seg)
+
+        if not colliding_segments:
+            print("  No collisions found in iteration {}".format(iteration + 1))
+            break
+
+        print("  Iteration {}: Found {} colliding segments: {}".format(
+            iteration + 1, len(colliding_segments), [s['index'] for s in colliding_segments]))
+
+        # Fix each colliding segment
+        for seg in colliding_segments:
+            current_pos = seg['segment'].TextPosition
+            text_height = seg.get('text_height', vertical_offset)
+
+            # Get dimension line position
+            perp_positions = [s['text_pos'].DotProduct(perp) for s in segs_sorted]
+            perp_positions_sorted = sorted(perp_positions)
+            n = len(perp_positions_sorted)
+            if n % 2 == 0:
+                dim_line_perp_pos = (perp_positions_sorted[n//2 - 1] + perp_positions_sorted[n//2]) / 2.0
+            else:
+                dim_line_perp_pos = perp_positions_sorted[n//2]
+
+            current_perp_pos = current_pos.DotProduct(perp)
+
+            # Calculate clearance needed
+            margin = vertical_offset * 0.5
+            min_clearance = text_height / 2.0 + margin
+
+            # Move away from dimension line
+            if current_perp_pos > dim_line_perp_pos:
+                # Move up
+                target_perp_pos = dim_line_perp_pos + min_clearance
+                perp_offset = max(target_perp_pos - current_perp_pos, vertical_offset * 0.5)
+                new_pos = current_pos + perp * perp_offset
+                direction = "UP"
+            else:
+                # Move down
+                target_perp_pos = dim_line_perp_pos - min_clearance
+                perp_offset = min(target_perp_pos - current_perp_pos, -vertical_offset * 0.5)
+                new_pos = current_pos + perp * perp_offset
+                direction = "DOWN"
+
+            try:
+                seg['segment'].TextPosition = new_pos
+                total_fixed += 1
+                print("    Fixed Seg {}: moved {} by {:.4f}".format(
+                    seg['index'], direction, abs(perp_offset)))
+            except Exception as e:
+                print("    ERROR fixing Seg {}: {}".format(seg['index'], e))
+
+        doc.Regenerate()
+
+    if colliding_segments:
+        print("  WARNING: {} segments still colliding after {} iterations".format(
+            len(colliding_segments), max_iterations))
+    else:
+        print("  All segments clear of dimension line!")
+
+    return total_fixed
 
 def create_leaders_for_dimension(dimension, view):
     if skip_dimension(dimension):
@@ -1370,10 +1551,18 @@ def create_leaders_for_dimension(dimension, view):
         collision_fixes = fix_edge_collisions(
             segs_sorted, edge_segments_moved, dimension, view, dim_dir, perp, textnote_type_id, vertical_offset
         )
-        
+
         if collision_fixes > 0:
             print("\n  Applied {} fixes to edge segments crossing dimension line".format(collision_fixes))
-        
+
+        # FINAL CHECK: Check ALL segments for collisions with dimension line
+        final_fixes = fix_all_segment_collisions(
+            segs_sorted, view, dim_dir, perp, textnote_type_id, vertical_offset
+        )
+
+        if final_fixes > 0:
+            print("\n  Applied {} final fixes to segments crossing dimension line".format(final_fixes))
+
         print("\n=== Successfully placed {} leaders ===".format(success_count))
         return success_count
     
