@@ -71,17 +71,23 @@ Remaining problems: [1, 2, 3, 4, 5, 6]
 Processing 7 problem segments (all problems mode)
 Dimension direction: (0.000000000, 1.000000000, 0.000000000)
 Perpendicular direction: (0.000000000, 0.000000000, 1.000000000)
-Split: 3 in group 1, 4 in group 2
-Group 1 reference center: (-184.98,-53.66,24.37)
-Group1 Seg 1 level 1: offset=(0.00,0.00,0.28) target=(-184.98,-53.66,24.65)
-Group1 Seg 2 level 2: offset=(0.00,0.00,0.56) target=(-184.98,-53.66,24.93)
-Copied position to Seg 0: (-184.98,-53.66,24.37)
-Copied position to Seg 1: (-184.98,-53.66,24.65)
-Copied position to Seg 2: (-184.98,-53.66,24.93)
-Copied position to Seg 3: (-184.98,-51.91,24.37)
-Copied position to Seg 4: (-184.98,-51.25,24.37)
-Copied position to Seg 5: (-184.98,-50.71,24.37)
-Copied position to Seg 6: (-184.98,-50.01,24.37)
+First edge (Seg 0) moved: True
+Last edge (Seg 6) moved: False
+Stacking ALL segments over first edge
+Reference center: (-184.98,-53.66,24.52)
+Seg 1 level 1: offset=(0.00,0.00,0.28) target=(-184.98,-53.66,24.80)
+Seg 2 level 2: offset=(0.00,0.00,0.56) target=(-184.98,-53.66,25.08)
+Seg 3 level 3: offset=(0.00,0.00,0.84) target=(-184.98,-53.66,25.36)
+Seg 4 level 4: offset=(0.00,0.00,1.13) target=(-184.98,-53.66,25.64)
+Seg 5 level 5: offset=(0.00,0.00,1.41) target=(-184.98,-53.66,25.93)
+Seg 6 level 6: offset=(0.00,0.00,1.69) target=(-184.98,-53.66,26.21)
+Copied position to Seg 0: (-184.98,-53.66,24.52)
+Copied position to Seg 1: (-184.98,-53.66,24.80)
+Copied position to Seg 2: (-184.98,-53.66,25.08)
+Copied position to Seg 3: (-184.98,-53.66,25.36)
+Copied position to Seg 4: (-184.98,-53.66,25.64)
+Copied position to Seg 5: (-184.98,-53.66,25.93)
+Copied position to Seg 6: (-184.98,-53.66,26.21)
 
 === Successfully placed 8 leaders ===
 Cleaned up temporary TextNote type
