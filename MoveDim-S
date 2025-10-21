@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Auto-offset dimension texts on Sections - v1.2.1 Bugfix release
-FIXED: Critical NameError from v1.2
-- Fixed: get_textnote_center_bottom -> get_textnote_bottom_center
-- Removed: Dead code after process_edge_zones_section
-- Verified: All function definitions match their calls
+"""Auto-offset dimension texts on Sections - v1.2.2 Perpendicular fix
+FIXED: Critical perpendicular direction for vertical dimensions on sections
+- Check if all segments have same Z coordinate
+- For sections with Z=const: perpendicular = (0,0,1) UP
+- This fixes stacking issue where labels overlapped
+- Now labels stack vertically (Z direction) instead of horizontally (X)
 Based on working logic from MoveDim-H (Floor Plan)"""
 
-__title__ = 'Align S-Dimension\nSections v1.2.1'
+__title__ = 'Align S-Dimension\nSections v1.2.2'
 __author__ = 'AB Scripts'
 
 from Autodesk.Revit.DB import *
@@ -390,8 +391,8 @@ def collect_segments(dimension):
     return segs
 
 def dimension_axes(segments_info):
-    """Calculate dimension direction and perpendicular - SIMPLIFIED universal version
-    Based on MoveDim-H logic but adapted for sections"""
+    """Calculate dimension direction and perpendicular - FIXED for sections
+    Correctly handles vertical dimensions on section views"""
     if len(segments_info) >= 2:
         a = segments_info[0]['text_pos']
         b = segments_info[-1]['text_pos']
@@ -403,28 +404,40 @@ def dimension_axes(segments_info):
 
         print("  Dimension direction: ({:.4f}, {:.4f}, {:.4f})".format(d.X, d.Y, d.Z))
 
-        # Perpendicular depends on which axis is dominant
-        # For plans and sections, we want perpendicular IN THE VIEW PLANE
-        # Simple approach: perpendicular to (d.X, d.Y, 0) is (-d.Y, d.X, 0) for plans
-        # For sections perpendicular includes Z component
+        # CRITICAL FIX: Check if all segments have same Z coordinate
+        # If so, this is likely a section view with dimension in XY plane
+        z_coords = [s['text_pos'].Z for s in segments_info]
+        z_min = min(z_coords)
+        z_max = max(z_coords)
+        z_const = abs(z_max - z_min) < 0.001
 
-        # Check if dimension is more in XY plane or involves Z
-        if abs(d.Z) < 0.5:
-            # Mostly in XY plane (horizontal/vertical on plan or section)
+        print("  Z range: {:.4f} to {:.4f} (const={})".format(z_min, z_max, z_const))
+
+        # For sections with constant Z (dimension in XY plane on screen)
+        if z_const and abs(d.Z) < 0.1:
+            # Dimension is in XY plane, perpendicular should go UP (Z direction)
+            # This is the case for vertical dimensions on sections
+            perp = XYZ(0, 0, 1)
+            print("  SECTION mode: Dimension in XY plane, perpendicular = UP (Z)")
+        elif abs(d.Z) < 0.5:
+            # Dimension mostly in XY plane (for plans)
+            # Perpendicular in XY plane: rotate 90° counter-clockwise
             perp = XYZ(-d.Y, d.X, 0)
             try:
                 perp = perp.Normalize()
             except:
                 perp = XYZ(0, 1, 0)
+            print("  PLAN mode: Perpendicular in XY plane")
         else:
-            # Involves Z significantly (vertical on section)
-            # Perpendicular should be in XY plane
+            # Dimension involves Z (goes up/down)
+            # Perpendicular should be horizontal
             perp = XYZ(-d.Y, d.X, 0)
             try:
                 perp = perp.Normalize()
             except:
                 # If d is purely vertical (Z), use X as perpendicular
                 perp = XYZ(1, 0, 0)
+            print("  3D mode: Perpendicular horizontal")
 
         print("  Perpendicular direction: ({:.4f}, {:.4f}, {:.4f})".format(perp.X, perp.Y, perp.Z))
     else:
