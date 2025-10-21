@@ -1,0 +1,1290 @@
+# -*- coding: utf-8 -*-
+"""Auto-offset dimension texts - v1.0 Center alignment for middle segments"""
+
+__title__ = 'Align H-Dimension\nv1.0'
+__author__ = 'AB Scripts'
+
+from Autodesk.Revit.DB import *
+from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
+from pyrevit import revit, forms
+import random
+import string
+
+doc = revit.doc
+uidoc = revit.uidoc
+
+# Global parameters
+OVERLAP_THRESHOLD_RATIO = 0.60
+VERTICAL_OFFSET_MULTIPLIER = 1.5
+MIN_CLEAN_SEGMENT_RATIO = 0.20
+
+def _to_float(s, default):
+    try:
+        return float(s.replace(',', '.'))
+    except:
+        return default
+
+def get_user_params():
+    global OVERLAP_THRESHOLD_RATIO, VERTICAL_OFFSET_MULTIPLIER, MIN_CLEAN_SEGMENT_RATIO
+    
+    try:
+        result = forms.alert(
+            'Configure settings:\n\n'
+            '1. Overlap Threshold (current: {:.0f}%)\n'
+            '2. Vertical Offset (current: {:.1f})\n'
+            '3. Min Clean Segment (current: {:.0f}%)\n\n'
+            'Click OK to enter values or Cancel to use defaults.'.format(
+                OVERLAP_THRESHOLD_RATIO * 100,
+                VERTICAL_OFFSET_MULTIPLIER,
+                MIN_CLEAN_SEGMENT_RATIO * 100
+            ),
+            title='Auto Dimension Leaders Settings',
+            ok=True,
+            cancel=True
+        )
+        
+        if not result:
+            print("="*60)
+            print("Using default settings")
+            print("="*60)
+            return True
+        
+        s = forms.ask_for_string(
+            default=str(int(OVERLAP_THRESHOLD_RATIO*100)),
+            prompt='Overlap Threshold (70-95):\nPercentage for detecting overlaps',
+            title='Setting 1/3'
+        )
+        if s: OVERLAP_THRESHOLD_RATIO = _to_float(s, 85) / 100.0
+        
+        s = forms.ask_for_string(
+            default=str(VERTICAL_OFFSET_MULTIPLIER),
+            prompt='Vertical Offset Multiplier (1-5):\nSpacing between text levels',
+            title='Setting 2/3'
+        )
+        if s: VERTICAL_OFFSET_MULTIPLIER = _to_float(s, VERTICAL_OFFSET_MULTIPLIER)
+        
+        s = forms.ask_for_string(
+            default=str(int(MIN_CLEAN_SEGMENT_RATIO*100)),
+            prompt='Min Clean Segment (20-50):\nMinimum free space percentage',
+            title='Setting 3/3'
+        )
+        if s: MIN_CLEAN_SEGMENT_RATIO = _to_float(s, 20) / 100.0
+        
+    except:
+        pass
+    
+    print("="*60)
+    print("SETTINGS:")
+    print("  Overlap threshold: {:.0f}%".format(OVERLAP_THRESHOLD_RATIO*100))
+    print("  Vertical offset: {:.1f} x text height".format(VERTICAL_OFFSET_MULTIPLIER))
+    print("  Min clean segment: {:.0f}%".format(MIN_CLEAN_SEGMENT_RATIO*100))
+    print("  Alignment: CENTER (fixed)")
+    print("="*60)
+    
+    return True
+
+class DimensionSelectionFilter(ISelectionFilter):
+    def AllowElement(self, element):
+        return isinstance(element, Dimension)
+    def AllowReference(self, reference, position):
+        return False
+
+def get_view_scale(view):
+    try:
+        scale = view.Scale
+        print("View scale: 1:{}".format(scale))
+        return float(scale)
+    except Exception as e:
+        print("Cannot get view scale, using default 50:", e)
+        return 50.0
+
+def get_text_size_and_type(dimension):
+    try:
+        dim_type = doc.GetElement(dimension.GetTypeId())
+        if dim_type:
+            p = dim_type.get_Parameter(BuiltInParameter.TEXT_SIZE)
+            if p: 
+                ts = p.AsDouble()
+                print("Text size: {:.4f} feet".format(ts))
+                return ts, dim_type
+    except Exception as e:
+        print("Error get text size:", e)
+    print("Fallback text size 0.1 ft")
+    return 0.1, None
+
+def get_value_string_for_segment(dimension, segment):
+    try:
+        if hasattr(segment,'ValueOverride') and segment.ValueOverride:
+            return segment.ValueOverride
+    except: pass
+    
+    try:
+        if hasattr(segment,'ValueString') and segment.ValueString:
+            base = segment.ValueString
+        else:
+            val = segment.Value if hasattr(segment,'Value') else 0.0
+            units = doc.GetUnits()
+            try:
+                base = UnitFormatUtils.Format(units, UnitType.UT_Length, val, False, False)
+            except:
+                base = "{:.3f}".format(val)
+        
+        prefix = (segment.Prefix or "") if hasattr(segment,"Prefix") else ""
+        suffix = (segment.Suffix or "") if hasattr(segment,"Suffix") else ""
+        above  = (segment.Above  or "") if hasattr(segment,"Above")  else ""
+        below  = (segment.Below  or "") if hasattr(segment,"Below")  else ""
+        
+        s = prefix + base + suffix
+        if above: s = above + " " + s
+        if below: s = s + " " + below
+        return s.strip()
+    except Exception as e:
+        print("get_value_string_for_segment error:", e)
+        return ""
+
+def generate_random_name():
+    chars = string.ascii_uppercase + string.digits
+    random_suffix = ''.join(random.choice(chars) for _ in range(6))
+    return 'DimSegment_' + random_suffix
+
+def get_dimension_text_properties(dimension):
+    properties = {
+        'text_size': 0.1,
+        'width_factor': 1.0,
+        'text_font': 'Arial',
+        'bold': False,
+        'italic': False,
+        'underline': False
+    }
+    
+    try:
+        dim_type = doc.GetElement(dimension.GetTypeId())
+        if not dim_type:
+            return properties
+        
+        p = dim_type.get_Parameter(BuiltInParameter.TEXT_SIZE)
+        if p: properties['text_size'] = p.AsDouble()
+        
+        p = dim_type.get_Parameter(BuiltInParameter.TEXT_WIDTH_SCALE)
+        if p: properties['width_factor'] = p.AsDouble()
+        
+        p = dim_type.get_Parameter(BuiltInParameter.TEXT_FONT)
+        if p: properties['text_font'] = p.AsString()
+        
+        p = dim_type.get_Parameter(BuiltInParameter.TEXT_STYLE_BOLD)
+        if p: properties['bold'] = p.AsInteger() == 1
+        
+        p = dim_type.get_Parameter(BuiltInParameter.TEXT_STYLE_ITALIC)
+        if p: properties['italic'] = p.AsInteger() == 1
+        
+        p = dim_type.get_Parameter(BuiltInParameter.TEXT_STYLE_UNDERLINE)
+        if p: properties['underline'] = p.AsInteger() == 1
+            
+    except Exception as e:
+        print('Error getting dimension properties: {0}'.format(e))
+    
+    return properties
+
+def create_textnote_type(properties):
+    try:
+        collector = FilteredElementCollector(doc).OfClass(TextNoteType)
+        existing_type = collector.FirstElement()
+        
+        if not existing_type:
+            return None
+        
+        new_name = generate_random_name()
+        new_type = existing_type.Duplicate(new_name)
+        
+        p = new_type.get_Parameter(BuiltInParameter.TEXT_SIZE)
+        if p and not p.IsReadOnly: p.Set(properties['text_size'])
+        
+        p = new_type.get_Parameter(BuiltInParameter.TEXT_WIDTH_SCALE)
+        if p and not p.IsReadOnly: p.Set(properties['width_factor'])
+        
+        p = new_type.get_Parameter(BuiltInParameter.TEXT_FONT)
+        if p and not p.IsReadOnly: p.Set(properties['text_font'])
+        
+        p = new_type.get_Parameter(BuiltInParameter.TEXT_STYLE_BOLD)
+        if p and not p.IsReadOnly: p.Set(1 if properties['bold'] else 0)
+        
+        p = new_type.get_Parameter(BuiltInParameter.TEXT_STYLE_ITALIC)
+        if p and not p.IsReadOnly: p.Set(1 if properties['italic'] else 0)
+        
+        p = new_type.get_Parameter(BuiltInParameter.TEXT_STYLE_UNDERLINE)
+        if p and not p.IsReadOnly: p.Set(1 if properties['underline'] else 0)
+        
+        p = new_type.get_Parameter(BuiltInParameter.LEADER_OFFSET_SHEET)
+        if p and not p.IsReadOnly: p.Set(0.0)
+        
+        p = new_type.get_Parameter(BuiltInParameter.TEXT_ALIGN_HORZ)
+        if p and not p.IsReadOnly: p.Set(1)
+        
+        p = new_type.get_Parameter(BuiltInParameter.TEXT_ALIGN_VERT)
+        if p and not p.IsReadOnly: p.Set(1)
+        
+        return new_type.Id
+        
+    except Exception as e:
+        print('Error creating TextNote type: {0}'.format(e))
+        return None
+
+def get_textnote_bottom_center(textnote, view):
+    try:
+        bbox = textnote.get_BoundingBox(view)
+        if bbox:
+            return XYZ((bbox.Min.X + bbox.Max.X) / 2.0, bbox.Min.Y, (bbox.Min.Z + bbox.Max.Z) / 2.0)
+    except:
+        pass
+    return None
+
+def get_textnote_bottom_left(textnote, view):
+    try:
+        bbox = textnote.get_BoundingBox(view)
+        if bbox:
+            return XYZ(bbox.Min.X, bbox.Min.Y, (bbox.Min.Z + bbox.Max.Z) / 2.0)
+    except:
+        pass
+    return None
+
+def get_textnote_real_width(textnote, view):
+    """Get real width of TextNote from its bounding box"""
+    try:
+        bbox = textnote.get_BoundingBox(view)
+        if bbox:
+            return bbox.Max.X - bbox.Min.X
+    except:
+        pass
+    return 0.0
+
+def get_textnote_real_height(textnote, view):
+    """Get real height of TextNote from its bounding box"""
+    try:
+        bbox = textnote.get_BoundingBox(view)
+        if bbox:
+            return bbox.Max.Y - bbox.Min.Y
+    except:
+        pass
+    return 0.0
+
+def get_textnote_top_edge(textnote, view):
+    """Get top Y coordinate of TextNote"""
+    try:
+        bbox = textnote.get_BoundingBox(view)
+        if bbox:
+            return bbox.Max.Y
+    except:
+        pass
+    return None
+
+def get_textnote_bottom_right(textnote, view):
+    try:
+        bbox = textnote.get_BoundingBox(view)
+        if bbox:
+            return XYZ(bbox.Max.X, bbox.Min.Y, (bbox.Min.Z + bbox.Max.Z) / 2.0)
+    except:
+        pass
+    return None
+
+def collect_segments(dimension):
+    segs = []
+    try:
+        segments = dimension.Segments
+        if not segments or segments.Size == 0:
+            return segs
+            
+        for i in range(segments.Size):
+            seg = segments.get_Item(i)
+            
+            if not hasattr(seg,'TextPosition'):
+                continue
+                
+            text_pos = seg.TextPosition
+            if not text_pos:
+                continue
+            
+            val = seg.Value if hasattr(seg,'Value') else 0.0
+            s = get_value_string_for_segment(dimension, seg)
+            if not s:
+                continue
+            
+            segs.append({
+                'index': i,
+                'segment': seg,
+                'text': s,
+                'text_pos': text_pos,
+                'value': val
+            })
+            
+    except Exception as e:
+        print("collect_segments error:", e)
+    return segs
+
+def dimension_axes(segments_info):
+    if len(segments_info) >= 2:
+        a = segments_info[0]['text_pos']
+        b = segments_info[-1]['text_pos']
+        d = b - a
+        try:
+            d = d.Normalize()
+        except:
+            d = XYZ(1,0,0)
+    else:
+        d = XYZ(1,0,0)
+    perp = XYZ(-d.Y, d.X, 0)
+    return d, perp
+
+def skip_dimension(dimension):
+    try:
+        if isinstance(dimension, SpotDimension):
+            return True
+    except: pass
+    try:
+        dt = doc.GetElement(dimension.GetTypeId())
+        name = dt.get_Parameter(BuiltInParameter.ALL_MODEL_TYPE_NAME).AsString() if dt else ""
+        if "Ordinate" in name or "Equality" in name:
+            return True
+    except: pass
+    return False
+
+def analyze_segments_with_textnotes(segs_sorted, dimension, view, textnote_type_id):
+    """Accurate analysis using real TextNote widths"""
+    print("\n--- Analyzing segments with TextNotes (accurate) ---")
+    
+    # Create TextNotes for all segments
+    textnotes_map = {}
+    real_widths_map = {}
+    
+    for seg in segs_sorted:
+        try:
+            tn = TextNote.Create(doc, view.Id, seg['text_pos'], seg['text'], textnote_type_id)
+            textnotes_map[seg['index']] = tn
+        except Exception as e:
+            print("  Failed to create TextNote for Seg {}: {}".format(seg['index'], e))
+    
+    doc.Regenerate()
+    
+    # Measure real widths
+    for seg_idx, tn in textnotes_map.items():
+        real_width = get_textnote_real_width(tn, view)
+        real_widths_map[seg_idx] = real_width
+    
+    # Update segments with real widths
+    for seg in segs_sorted:
+        if seg['index'] in real_widths_map:
+            seg['text_width'] = real_widths_map[seg['index']]
+    
+    # Analyze segments
+    problem_segments = set()
+    clean_segments = []
+    
+    for s in segs_sorted:
+        if s['index'] not in real_widths_map:
+            problem_segments.add(s['index'])
+            continue
+        
+        ratio = s['text_width'] / s['value'] if s['value'] > 0 else 999
+        is_problem = ratio > OVERLAP_THRESHOLD_RATIO
+        
+        print("  Seg {}: '{}' width={:.4f} value={:.4f} ratio={:.0f}% -> {}".format(
+            s['index'], s['text'], s['text_width'], s['value'], ratio*100, 
+            "PROBLEM" if is_problem else "OK"))
+        
+        if is_problem:
+            problem_segments.add(s['index'])
+        else:
+            free_space_ratio = 1.0 - ratio
+            if free_space_ratio >= MIN_CLEAN_SEGMENT_RATIO:
+                clean_segments.append(s)
+    
+    # Check adjacent overlaps using real widths
+    clean_indices = set([c['index'] for c in clean_segments])
+    
+    for i in range(len(segs_sorted) - 1):
+        curr = segs_sorted[i]
+        next_seg = segs_sorted[i + 1]
+        
+        if curr['index'] not in real_widths_map or next_seg['index'] not in real_widths_map:
+            continue
+        
+        dist = (next_seg['text_pos'] - curr['text_pos']).GetLength()
+        min_dist = (curr['text_width'] + next_seg['text_width']) / 2.0
+        
+        if dist < min_dist:
+            print("  Adjacent overlap detected: Seg {} <-> Seg {}".format(curr['index'], next_seg['index']))
+            
+            curr_is_clean = curr['index'] in clean_indices
+            next_is_clean = next_seg['index'] in clean_indices
+            
+            if not curr_is_clean and not next_is_clean:
+                problem_segments.add(curr['index'])
+                problem_segments.add(next_seg['index'])
+            elif curr_is_clean and not next_is_clean:
+                problem_segments.add(next_seg['index'])
+            elif not curr_is_clean and next_is_clean:
+                problem_segments.add(curr['index'])
+            else:
+                if curr['value'] < next_seg['value']:
+                    problem_segments.add(curr['index'])
+                    clean_segments = [c for c in clean_segments if c['index'] != curr['index']]
+                else:
+                    problem_segments.add(next_seg['index'])
+                    clean_segments = [c for c in clean_segments if c['index'] != next_seg['index']]
+    
+    print("*** Problem segments: {} ***".format(sorted(problem_segments)))
+    print("*** Clean segments: {} ***".format([c['index'] for c in clean_segments]))
+    
+    return problem_segments, clean_segments, textnotes_map
+
+def find_placement_segments(problem_seg, clean_segments, segs_sorted, dim_dir):
+    """Find the nearest clean segment for placing problem segment"""
+    if not clean_segments:
+        return None
+    
+    prob_pos = problem_seg['text_pos']
+    
+    # First try: find clean segments that can fit the text width
+    candidates = []
+    for clean in clean_segments:
+        if clean['value'] >= problem_seg['text_width'] * 0.8:
+            dist = abs((clean['text_pos'] - prob_pos).DotProduct(dim_dir))
+            candidates.append((dist, clean))
+    
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+    
+    # Second try: if no suitable clean segment found, use the nearest one anyway
+    best_clean = None
+    best_distance = float('inf')
+    
+    for clean in clean_segments:
+        dist = abs((clean['text_pos'] - prob_pos).DotProduct(dim_dir))
+        if dist < best_distance:
+            best_distance = dist
+            best_clean = clean
+    
+    return best_clean
+
+def create_leaders_for_dimension(dimension, view):
+    if skip_dimension(dimension):
+        return 0
+
+    view_scale = get_view_scale(view)
+    text_size, dim_type = get_text_size_and_type(dimension)
+    
+    segs = collect_segments(dimension)
+    if not segs:
+        return 0
+
+    print("\nAnalyzing {} segments...".format(len(segs)))
+    
+    dim_dir, perp = dimension_axes(segs)
+    segs_sorted = sorted(segs, key=lambda s: s['text_pos'].DotProduct(dim_dir))
+    
+    # Create TextNote type
+    properties = get_dimension_text_properties(dimension)
+    textnote_type_id = create_textnote_type(properties)
+    if not textnote_type_id:
+        return 0
+    
+    doc.Regenerate()
+    
+    try:
+        # Accurate analysis with TextNotes
+        problem_indices, clean_segments, analysis_textnotes = analyze_segments_with_textnotes(
+            segs_sorted, dimension, view, textnote_type_id
+        )
+        
+        # Clean up analysis TextNotes
+        for tn in analysis_textnotes.values():
+            try:
+                doc.Delete(tn.Id)
+            except:
+                pass
+        
+        doc.Regenerate()
+        
+        if not problem_indices:
+            print("No problems found!")
+            return 0
+        
+        vertical_offset = text_size * view_scale * VERTICAL_OFFSET_MULTIPLIER
+        horizontal_offset = text_size * view_scale * 2.0
+        
+        success_count = 0
+        edge_segments_moved = set()
+        
+        # Process edge segments
+        print("\n--- Processing edge segments ---")
+        
+        if len(segs_sorted) >= 2:
+            left_edge = segs_sorted[0]
+            right_edge = segs_sorted[-1]
+            
+            if left_edge['index'] in problem_indices:
+                # Initial offset - will be adjusted later if needed
+                h_offset = max(horizontal_offset, left_edge['text_width'] * 0.7)
+                new_pos = left_edge['text_pos'] + dim_dir * (-h_offset)
+                try:
+                    left_edge['segment'].TextPosition = new_pos
+                    success_count += 1
+                    edge_segments_moved.add(left_edge['index'])
+                    print("  Moved LEFT edge Seg {} (initial offset: {:.2f})".format(left_edge['index'], h_offset))
+                except Exception as e:
+                    print("  ERROR: {}".format(e))
+            
+            if right_edge['index'] in problem_indices and right_edge['index'] != left_edge['index']:
+                # Initial offset - will be adjusted later if needed
+                h_offset = max(horizontal_offset, right_edge['text_width'] * 0.7)
+                new_pos = right_edge['text_pos'] + dim_dir * h_offset
+                try:
+                    right_edge['segment'].TextPosition = new_pos
+                    success_count += 1
+                    edge_segments_moved.add(right_edge['index'])
+                    print("  Moved RIGHT edge Seg {} (initial offset: {:.2f})".format(right_edge['index'], h_offset))
+                except Exception as e:
+                    print("  ERROR: {}".format(e))
+        
+        # Remove edge segments from problem list
+        problem_indices = problem_indices - edge_segments_moved
+        print("  Remaining problems: {}".format(sorted(problem_indices)))
+        
+        if len(problem_indices) == 0:
+            print("\n=== Successfully placed {} leaders ===".format(success_count))
+            return success_count
+        
+        # Choose strategy
+        if len(clean_segments) > 0:
+            print("\n--- Using CLEAN SEGMENTS strategy (CENTER alignment) ---")
+            
+            # Get edge segment references
+            left_edge_seg = segs_sorted[0]
+            right_edge_seg = segs_sorted[-1]
+            
+            # Find edge zones: segments between edge and first clean segment
+            left_clean_idx = None
+            right_clean_idx = None
+            
+            # Find first clean segment from left
+            for seg in segs_sorted:
+                if seg['index'] in [c['index'] for c in clean_segments]:
+                    left_clean_idx = seg['index']
+                    break
+            
+            # Find first clean segment from right
+            for seg in reversed(segs_sorted):
+                if seg['index'] in [c['index'] for c in clean_segments]:
+                    right_clean_idx = seg['index']
+                    break
+            
+            print("  First clean from left: Seg {}".format(left_clean_idx))
+            print("  First clean from right: Seg {}".format(right_clean_idx))
+            
+            # Determine edge zone segments
+            edge_zone_segments = set()
+            left_edge_zone_count = 0
+            right_edge_zone_count = 0
+            
+            # Left edge zone: if left edge was moved, check segments between it and first clean
+            if left_edge_seg['index'] in edge_segments_moved and left_clean_idx is not None:
+                # All problem segments between left edge and first clean
+                for seg in segs_sorted:
+                    if seg['index'] <= left_edge_seg['index']:
+                        continue
+                    if seg['index'] >= left_clean_idx:
+                        break
+                    if seg['index'] in problem_indices:
+                        edge_zone_segments.add(seg['index'])
+                        left_edge_zone_count += 1
+                if edge_zone_segments:
+                    print("  Left edge zone segments: {}".format(sorted(edge_zone_segments)))
+            
+            # Right edge zone: if right edge was moved, check segments between it and first clean
+            if right_edge_seg['index'] in edge_segments_moved and right_clean_idx is not None:
+                # All problem segments between right edge and first clean from right
+                for seg in reversed(segs_sorted):
+                    if seg['index'] >= right_edge_seg['index']:
+                        continue
+                    if seg['index'] <= right_clean_idx:
+                        break
+                    if seg['index'] in problem_indices:
+                        edge_zone_segments.add(seg['index'])
+                        right_edge_zone_count += 1
+                if edge_zone_segments:
+                    right_zone_only = [s for s in edge_zone_segments if s > right_clean_idx]
+                    if right_zone_only:
+                        print("  Right edge zone segments: {}".format(sorted(right_zone_only)))
+            
+            # Recalculate edge offsets based on how many segments will stack
+            if left_edge_zone_count > 0 and left_edge_seg['index'] in edge_segments_moved:
+                segments_to_left_edge = (left_edge_zone_count + 1) // 2  # Half will go to edge
+                required_offset = horizontal_offset + (segments_to_left_edge * vertical_offset * 0.5)
+                h_offset = max(required_offset, left_edge_seg['text_width'] * 1.2)
+                new_pos = left_edge_seg['text_pos'] + dim_dir * (-h_offset)
+                try:
+                    left_edge_seg['segment'].TextPosition = new_pos
+                    print("  Adjusted LEFT edge Seg {} offset to {:.2f} (for {} stacked segments)".format(
+                        left_edge_seg['index'], h_offset, segments_to_left_edge))
+                except Exception as e:
+                    print("  ERROR adjusting left edge: {}".format(e))
+            
+            if right_edge_zone_count > 0 and right_edge_seg['index'] in edge_segments_moved:
+                segments_to_right_edge = (right_edge_zone_count + 1) // 2  # Half will go to edge
+                required_offset = horizontal_offset + (segments_to_right_edge * vertical_offset * 0.5)
+                h_offset = max(required_offset, right_edge_seg['text_width'] * 1.2)
+                new_pos = right_edge_seg['text_pos'] + dim_dir * h_offset
+                try:
+                    right_edge_seg['segment'].TextPosition = new_pos
+                    print("  Adjusted RIGHT edge Seg {} offset to {:.2f} (for {} stacked segments)".format(
+                        right_edge_seg['index'], h_offset, segments_to_right_edge))
+                except Exception as e:
+                    print("  ERROR adjusting right edge: {}".format(e))
+            
+            # Process edge zone segments (like "all problems" strategy)
+            if edge_zone_segments:
+                print("\n--- Processing EDGE ZONE segments ---")
+                
+                # Split edge zones: half go to edge, half go to clean segment
+                left_edge_zone = [s for s in edge_zone_segments if left_clean_idx is not None and s < left_clean_idx]
+                right_edge_zone = [s for s in edge_zone_segments if right_clean_idx is not None and s > right_clean_idx]
+                
+                # Split left edge zone
+                left_to_edge = set()
+                left_to_clean = set()
+                if left_edge_zone:
+                    left_edge_zone_sorted = sorted(left_edge_zone)
+                    split_point = len(left_edge_zone_sorted) // 2
+                    left_to_edge = set(left_edge_zone_sorted[:split_point])
+                    left_to_clean = set(left_edge_zone_sorted[split_point:])
+                    print("  Left zone: {} segments -> {} to edge, {} to clean".format(
+                        len(left_edge_zone), len(left_to_edge), len(left_to_clean)))
+                
+                # Split right edge zone
+                right_to_edge = set()
+                right_to_clean = set()
+                if right_edge_zone:
+                    right_edge_zone_sorted = sorted(right_edge_zone, reverse=True)
+                    split_point = len(right_edge_zone_sorted) // 2
+                    right_to_edge = set(right_edge_zone_sorted[:split_point])
+                    right_to_clean = set(right_edge_zone_sorted[split_point:])
+                    print("  Right zone: {} segments -> {} to edge, {} to clean".format(
+                        len(right_edge_zone), len(right_to_edge), len(right_to_clean)))
+                
+                # Process segments going to edges
+                edge_count = 0
+                segments_to_edge = left_to_edge | right_to_edge
+                if segments_to_edge:
+                    edge_count = process_edge_zones(
+                        segments_to_edge, edge_segments_moved, segs_sorted, left_clean_idx, right_clean_idx,
+                        dimension, view, vertical_offset, dim_dir, perp, textnote_type_id
+                    )
+                    success_count += edge_count
+                
+                # Remove all edge zone segments from problem list
+                problem_indices = problem_indices - edge_zone_segments
+                
+                # Add back segments going to clean
+                segments_to_clean = left_to_clean | right_to_clean
+                problem_indices = problem_indices | segments_to_clean
+                
+                print("  Remaining problems after edge zones: {}".format(sorted(problem_indices)))
+            
+            # Process remaining center problems over clean segments
+            if problem_indices:
+                success_count += process_with_clean_segments(
+                    problem_indices, clean_segments, segs_sorted,
+                    dimension, view, vertical_offset, dim_dir, perp, textnote_type_id
+                )
+        else:
+            print("\n--- Using ALL PROBLEMS strategy ---")
+            success_count += process_all_problems(
+                problem_indices, edge_segments_moved, segs_sorted,
+                dimension, view, vertical_offset, dim_dir, perp, textnote_type_id
+            )
+        
+        print("\n=== Successfully placed {} leaders ===".format(success_count))
+        return success_count
+    
+    finally:
+        # Always delete the temporary TextNote type
+        try:
+            doc.Delete(textnote_type_id)
+            print("  Cleaned up temporary TextNote type")
+        except Exception as e:
+            print("  Warning: Could not delete TextNote type: {}".format(e))
+
+
+def process_edge_zones(edge_zone_indices, edge_segments_moved, segs_sorted, left_clean_idx, right_clean_idx,
+                       dimension, view, vertical_offset, dim_dir, perp, textnote_type_id):
+    """Process segments in edge zones - between edge and first clean segment"""
+    
+    edge_zone_segs = [s for s in segs_sorted if s['index'] in edge_zone_indices]
+    if not edge_zone_segs:
+        return 0
+    
+    print("  Processing {} edge zone segments".format(len(edge_zone_segs)))
+    
+    # Get edge segment references
+    left_edge_seg = segs_sorted[0]
+    right_edge_seg = segs_sorted[-1]
+    
+    # Create TextNotes for ALL segments (including edge segments if they were moved)
+    textnotes_map = {}
+    
+    # Add edge segments to textnotes if they were moved
+    segments_to_create = list(edge_zone_segs)
+    if left_edge_seg['index'] in edge_segments_moved:
+        segments_to_create.append(left_edge_seg)
+    if right_edge_seg['index'] in edge_segments_moved and right_edge_seg['index'] != left_edge_seg['index']:
+        segments_to_create.append(right_edge_seg)
+    
+    for seg in segments_to_create:
+        try:
+            tn = TextNote.Create(doc, view.Id, seg['segment'].TextPosition, seg['text'], textnote_type_id)
+            textnotes_map[seg['index']] = tn
+        except:
+            pass
+    
+    doc.Regenerate()
+    
+    left_target = None
+    right_target = None
+    
+    if left_edge_seg['index'] in edge_segments_moved and left_edge_seg['index'] in textnotes_map:
+        left_tn = textnotes_map[left_edge_seg['index']]
+        left_br = get_textnote_bottom_right(left_tn, view)
+        if left_br:
+            left_target = XYZ(left_br.X, left_edge_seg['text_pos'].Y, left_br.Z)
+    
+    if right_edge_seg['index'] in edge_segments_moved and right_edge_seg['index'] in textnotes_map:
+        right_tn = textnotes_map[right_edge_seg['index']]
+        right_bl = get_textnote_bottom_left(right_tn, view)
+        if right_bl:
+            right_target = XYZ(right_bl.X, right_edge_seg['text_pos'].Y, right_bl.Z)
+    
+    # Align edge TextNotes
+    if left_target and left_edge_seg['index'] in textnotes_map:
+        left_tn = textnotes_map[left_edge_seg['index']]
+        left_br_before = get_textnote_bottom_right(left_tn, view)
+        if left_br_before:
+            correction = XYZ(
+                left_target.X - left_br_before.X,
+                left_target.Y - left_br_before.Y,
+                left_target.Z - left_br_before.Z
+            )
+            left_tn.Coord = XYZ(left_tn.Coord.X + correction.X, left_tn.Coord.Y + correction.Y, left_tn.Coord.Z + correction.Z)
+            doc.Regenerate()
+    
+    if right_target and right_edge_seg['index'] in textnotes_map:
+        right_tn = textnotes_map[right_edge_seg['index']]
+        right_bl_before = get_textnote_bottom_left(right_tn, view)
+        if right_bl_before:
+            correction = XYZ(
+                right_target.X - right_bl_before.X,
+                right_target.Y - right_bl_before.Y,
+                right_target.Z - right_bl_before.Z
+            )
+            right_tn.Coord = XYZ(right_tn.Coord.X + correction.X, right_tn.Coord.Y + correction.Y, right_tn.Coord.Z + correction.Z)
+            doc.Regenerate()
+    
+    # Divide into left and right zones
+    left_zone = []
+    right_zone = []
+    
+    for seg in edge_zone_segs:
+        if left_clean_idx is not None and seg['index'] < left_clean_idx:
+            left_zone.append((seg['index'], seg['text_pos'].DotProduct(dim_dir)))
+        elif right_clean_idx is not None and seg['index'] > right_clean_idx:
+            right_zone.append((seg['index'], seg['text_pos'].DotProduct(dim_dir)))
+    
+    print("  Left zone (raw): {}".format([idx for idx, _ in left_zone]))
+    print("  Right zone (raw): {}".format([idx for idx, _ in right_zone]))
+    
+    # Sort zones: from edge to clean segment
+    left_zone.sort(key=lambda x: x[1])  # ascending
+    right_zone.sort(key=lambda x: x[1], reverse=True)  # descending
+    
+    print("  Left zone (sorted): {}".format([idx for idx, _ in left_zone]))
+    print("  Right zone (sorted): {}".format([idx for idx, _ in right_zone]))
+    
+    # Stack left zone
+    if left_zone and left_target:
+        left_tn_ref = textnotes_map.get(left_edge_seg['index'])
+        if left_tn_ref:
+            left_br_ref = get_textnote_bottom_right(left_tn_ref, view)
+            if left_br_ref:
+                level = 0
+                for seg_idx, seg_pos in left_zone:
+                    if seg_idx in textnotes_map:
+                        tn = textnotes_map[seg_idx]
+                        
+                        level += 1
+                        target_br = XYZ(left_br_ref.X, left_br_ref.Y + vertical_offset * level, left_br_ref.Z)
+                        
+                        curr_br = get_textnote_bottom_right(tn, view)
+                        if curr_br:
+                            correction = XYZ(
+                                target_br.X - curr_br.X,
+                                target_br.Y - curr_br.Y,
+                                target_br.Z - curr_br.Z
+                            )
+                            tn.Coord = XYZ(tn.Coord.X + correction.X, tn.Coord.Y + correction.Y, tn.Coord.Z + correction.Z)
+                            print("    Left zone Seg {} -> level {}".format(seg_idx, level))
+                doc.Regenerate()
+    
+    # Stack right zone
+    if right_zone and right_target:
+        right_tn_ref = textnotes_map.get(right_edge_seg['index'])
+        if right_tn_ref:
+            right_bl_ref = get_textnote_bottom_left(right_tn_ref, view)
+            if right_bl_ref:
+                level = 0
+                for seg_idx, seg_pos in right_zone:
+                    if seg_idx in textnotes_map:
+                        tn = textnotes_map[seg_idx]
+                        
+                        level += 1
+                        target_bl = XYZ(right_bl_ref.X, right_bl_ref.Y + vertical_offset * level, right_bl_ref.Z)
+                        
+                        curr_bl = get_textnote_bottom_left(tn, view)
+                        if curr_bl:
+                            correction = XYZ(
+                                target_bl.X - curr_bl.X,
+                                target_bl.Y - curr_bl.Y,
+                                target_bl.Z - curr_bl.Z
+                            )
+                            tn.Coord = XYZ(tn.Coord.X + correction.X, tn.Coord.Y + correction.Y, tn.Coord.Z + correction.Z)
+                            print("    Right zone Seg {} -> level {}".format(seg_idx, level))
+                doc.Regenerate()
+    
+    # Copy positions to segments (including edge segments)
+    count = 0
+    all_segs = segments_to_create
+    for seg in all_segs:
+        if seg['index'] in textnotes_map:
+            tn = textnotes_map[seg['index']]
+            tn_bc = get_textnote_bottom_center(tn, view)
+            if tn_bc:
+                try:
+                    seg['segment'].TextPosition = tn_bc
+                    count += 1
+                except:
+                    pass
+    
+    doc.Regenerate()
+    
+    # Cleanup
+    for tn in textnotes_map.values():
+        try:
+            doc.Delete(tn.Id)
+        except:
+            pass
+    
+    return count
+
+
+def process_with_clean_segments(problem_indices, clean_segments, segs_sorted,
+                                dimension, view, vertical_offset, dim_dir, perp, textnote_type_id):
+    """Strategy for when we have clean segments - CENTER alignment with proper sorting"""
+    
+    problem_segs = [s for s in segs_sorted if s['index'] in problem_indices]
+    if not problem_segs:
+        return 0
+    
+    print("  Using CENTER alignment with sorting")
+    
+    # Create TextNotes for problem segments
+    textnotes_map = {}
+    
+    for seg in problem_segs:
+        try:
+            tn = TextNote.Create(doc, view.Id, seg['segment'].TextPosition, seg['text'], textnote_type_id)
+            textnotes_map[seg['index']] = tn
+        except:
+            pass
+    
+    doc.Regenerate()
+    
+    # Dictionary to track segments for each clean segment: {clean_idx: [(seg_idx, position), ...]}
+    clean_segments_lists = {}
+    for clean_seg in clean_segments:
+        clean_segments_lists[clean_seg['index']] = []
+    
+    # First pass: assign problem segments to clean segments
+    assignments = {}  # {problem_seg_index: (target_clean, level, position)}
+    all_occupied_positions = []
+    
+    for problem_seg in sorted(problem_segs, key=lambda s: s['text_pos'].DotProduct(dim_dir)):
+        if problem_seg['index'] not in textnotes_map:
+            continue
+        
+        tn = textnotes_map[problem_seg['index']]
+        target_clean = find_placement_segments(problem_seg, clean_segments, segs_sorted, dim_dir)
+        
+        if not target_clean:
+            continue
+        
+        base_pos = target_clean['text_pos']
+        placed = False
+        
+        for level in range(1, 20):
+            target_bc = XYZ(base_pos.X, base_pos.Y + vertical_offset * level, base_pos.Z)
+            
+            # Check collisions
+            collision = False
+            for existing_pos in all_occupied_positions:
+                ex_point = XYZ(existing_pos[0], existing_pos[1], existing_pos[2])
+                ex_width = existing_pos[3]
+                
+                horiz_dist = abs((target_bc - ex_point).DotProduct(dim_dir))
+                min_horiz_dist = (problem_seg['text_width'] + ex_width) / 2.0 * 1.2
+                
+                vert_dist = abs((target_bc - ex_point).DotProduct(perp))
+                min_vert_dist = vertical_offset * 0.6
+                
+                if horiz_dist < min_horiz_dist and vert_dist < min_vert_dist:
+                    collision = True
+                    break
+            
+            if collision:
+                continue
+            
+            # Store assignment
+            problem_position = problem_seg['text_pos'].DotProduct(dim_dir)
+            assignments[problem_seg['index']] = (target_clean, level, problem_position)
+            all_occupied_positions.append((target_bc.X, target_bc.Y, target_bc.Z, problem_seg['text_width']))
+            
+            # Add to clean segment's list
+            clean_segments_lists[target_clean['index']].append((problem_seg['index'], problem_position))
+            
+            print("  Seg {} -> assigned to Seg {} at level {} (position {:.2f})".format(
+                problem_seg['index'], target_clean['index'], level, problem_position))
+            placed = True
+            break
+    
+    # Sort lists for each clean segment and reassign levels
+    print("\n  Sorting and reassigning levels:")
+    final_positions = {}  # {problem_seg_index: (target_bc, level)}
+    
+    for clean_idx, seg_list in clean_segments_lists.items():
+        if not seg_list:
+            continue
+        
+        # Get clean segment position
+        clean_seg = next((s for s in clean_segments if s['index'] == clean_idx), None)
+        if not clean_seg:
+            continue
+        
+        clean_position = clean_seg['text_pos'].DotProduct(dim_dir)
+        base_pos = clean_seg['text_pos']
+        
+        # Determine if segments are on the left or right
+        left_segments = [(idx, pos) for idx, pos in seg_list if pos < clean_position]
+        right_segments = [(idx, pos) for idx, pos in seg_list if pos >= clean_position]
+        
+        # Sort left segments (descending by position - from clean to left)
+        if left_segments:
+            left_segments.sort(key=lambda x: x[1], reverse=True)
+            print("    Clean Seg {}: LEFT segments: {}".format(
+                clean_idx, [idx for idx, _ in left_segments]))
+        
+        # Sort right segments (ascending by position - from clean to right)
+        if right_segments:
+            right_segments.sort(key=lambda x: x[1])
+            print("    Clean Seg {}: RIGHT segments: {}".format(
+                clean_idx, [idx for idx, _ in right_segments]))
+        
+        # Combine: left segments first (bottom to top), then right segments
+        sorted_segments = left_segments + right_segments
+        
+        # Assign new levels
+        for level, (seg_idx, pos) in enumerate(sorted_segments, start=1):
+            target_bc = XYZ(base_pos.X, base_pos.Y + vertical_offset * level, base_pos.Z)
+            final_positions[seg_idx] = (target_bc, level)
+            print("      Seg {} -> level {} (final)".format(seg_idx, level))
+    
+    # Place TextNotes at final positions
+    for seg_idx, (target_bc, level) in final_positions.items():
+        if seg_idx in textnotes_map:
+            tn = textnotes_map[seg_idx]
+            curr_bc = get_textnote_bottom_center(tn, view)
+            if curr_bc:
+                correction = XYZ(
+                    target_bc.X - curr_bc.X,
+                    target_bc.Y - curr_bc.Y,
+                    target_bc.Z - curr_bc.Z
+                )
+                tn.Coord = XYZ(tn.Coord.X + correction.X, tn.Coord.Y + correction.Y, tn.Coord.Z + correction.Z)
+    
+    doc.Regenerate()
+    
+    # Copy positions from TextNotes to segments
+    count = 0
+    for seg in problem_segs:
+        if seg['index'] in textnotes_map:
+            tn = textnotes_map[seg['index']]
+            tn_bc = get_textnote_bottom_center(tn, view)
+            if tn_bc:
+                try:
+                    seg['segment'].TextPosition = tn_bc
+                    count += 1
+                except:
+                    pass
+    
+    doc.Regenerate()
+    
+    # Cleanup
+    for tn in textnotes_map.values():
+        try:
+            doc.Delete(tn.Id)
+        except:
+            pass
+    
+    return count
+
+
+def process_all_problems(problem_indices, edge_segments_moved, segs_sorted,
+                        dimension, view, vertical_offset, dim_dir, perp, textnote_type_id):
+    """Strategy when all segments are problems - with proper sorting"""
+    
+    # Include edge segments
+    all_problem_indices = set(problem_indices) | edge_segments_moved
+    problem_segs = [s for s in segs_sorted if s['index'] in all_problem_indices]
+    
+    if not problem_segs:
+        return 0
+    
+    print("  Using sorting for all problems strategy")
+    
+    # Create TextNotes
+    textnotes_map = {}
+    for seg in problem_segs:
+        try:
+            tn = TextNote.Create(doc, view.Id, seg['segment'].TextPosition, seg['text'], textnote_type_id)
+            textnotes_map[seg['index']] = tn
+        except:
+            pass
+    
+    doc.Regenerate()
+    
+    # Get edge references
+    left_edge_seg = segs_sorted[0]
+    right_edge_seg = segs_sorted[-1]
+    
+    left_target = None
+    right_target = None
+    
+    if left_edge_seg['index'] in edge_segments_moved and left_edge_seg['index'] in textnotes_map:
+        left_tn = textnotes_map[left_edge_seg['index']]
+        left_br = get_textnote_bottom_right(left_tn, view)
+        if left_br:
+            left_target = XYZ(left_br.X, left_edge_seg['text_pos'].Y, left_br.Z)
+    
+    if right_edge_seg['index'] in edge_segments_moved and right_edge_seg['index'] in textnotes_map:
+        right_tn = textnotes_map[right_edge_seg['index']]
+        right_bl = get_textnote_bottom_left(right_tn, view)
+        if right_bl:
+            right_target = XYZ(right_bl.X, right_edge_seg['text_pos'].Y, right_bl.Z)
+    
+    # Align edge TextNotes
+    if left_target and left_edge_seg['index'] in textnotes_map:
+        left_tn = textnotes_map[left_edge_seg['index']]
+        left_br_before = get_textnote_bottom_right(left_tn, view)
+        if left_br_before:
+            correction = XYZ(
+                left_target.X - left_br_before.X,
+                left_target.Y - left_br_before.Y,
+                left_target.Z - left_br_before.Z
+            )
+            left_tn.Coord = XYZ(left_tn.Coord.X + correction.X, left_tn.Coord.Y + correction.Y, left_tn.Coord.Z + correction.Z)
+            doc.Regenerate()
+    
+    if right_target and right_edge_seg['index'] in textnotes_map:
+        right_tn = textnotes_map[right_edge_seg['index']]
+        right_bl_before = get_textnote_bottom_left(right_tn, view)
+        if right_bl_before:
+            correction = XYZ(
+                right_target.X - right_bl_before.X,
+                right_target.Y - right_bl_before.Y,
+                right_target.Z - right_bl_before.Z
+            )
+            right_tn.Coord = XYZ(right_tn.Coord.X + correction.X, right_tn.Coord.Y + correction.Y, right_tn.Coord.Z + correction.Z)
+            doc.Regenerate()
+    
+    # Divide into groups - evenly by count, not by position
+    left_pos = segs_sorted[0]['text_pos'].DotProduct(dim_dir)
+    right_pos = segs_sorted[-1]['text_pos'].DotProduct(dim_dir)
+    
+    # Sort all problem segments by position
+    all_problems_sorted = [(s['index'], s['text_pos'].DotProduct(dim_dir)) for s in problem_segs]
+    all_problems_sorted.sort(key=lambda x: x[1])
+    
+    # Split evenly by count
+    split_point = len(all_problems_sorted) // 2
+    left_group = all_problems_sorted[:split_point]
+    right_group = all_problems_sorted[split_point:]
+    
+    print("  Split evenly: {} to left, {} to right".format(len(left_group), len(right_group)))
+    print("  Left group (raw): {}".format([idx for idx, _ in left_group]))
+    print("  Right group (raw): {}".format([idx for idx, _ in right_group]))
+    
+    # Sort left group: from left edge to center (ascending by position)
+    # Segments closer to left edge (Seg 0) should be lower
+    left_group.sort(key=lambda x: x[1])
+    
+    # Sort right group: from right edge to center (descending by position)
+    # Segments closer to right edge (Seg N) should be lower
+    right_group.sort(key=lambda x: x[1], reverse=True)
+    
+    print("  Left group (sorted): {}".format([idx for idx, _ in left_group]))
+    print("  Right group (sorted): {}".format([idx for idx, _ in right_group]))
+    
+    # Stack left group with sorted order
+    if left_group and left_target:
+        left_tn_ref = textnotes_map.get(left_edge_seg['index'])
+        if left_tn_ref:
+            left_br_ref = get_textnote_bottom_right(left_tn_ref, view)
+            if left_br_ref:
+                level = 0
+                for seg_idx, seg_pos in left_group:
+                    if seg_idx in textnotes_map:
+                        tn = textnotes_map[seg_idx]
+                        
+                        if seg_idx == left_edge_seg['index']:
+                            continue
+                        
+                        level += 1
+                        target_br = XYZ(left_br_ref.X, left_br_ref.Y + vertical_offset * level, left_br_ref.Z)
+                        
+                        curr_br = get_textnote_bottom_right(tn, view)
+                        if curr_br:
+                            correction = XYZ(
+                                target_br.X - curr_br.X,
+                                target_br.Y - curr_br.Y,
+                                target_br.Z - curr_br.Z
+                            )
+                            tn.Coord = XYZ(tn.Coord.X + correction.X, tn.Coord.Y + correction.Y, tn.Coord.Z + correction.Z)
+                            print("    Left Seg {} -> level {}".format(seg_idx, level))
+                doc.Regenerate()
+    
+    # Stack right group with sorted order
+    if right_group and right_target:
+        right_tn_ref = textnotes_map.get(right_edge_seg['index'])
+        if right_tn_ref:
+            right_bl_ref = get_textnote_bottom_left(right_tn_ref, view)
+            if right_bl_ref:
+                level = 0
+                for seg_idx, seg_pos in right_group:
+                    if seg_idx in textnotes_map:
+                        tn = textnotes_map[seg_idx]
+                        
+                        if seg_idx == right_edge_seg['index']:
+                            continue
+                        
+                        level += 1
+                        target_bl = XYZ(right_bl_ref.X, right_bl_ref.Y + vertical_offset * level, right_bl_ref.Z)
+                        
+                        curr_bl = get_textnote_bottom_left(tn, view)
+                        if curr_bl:
+                            correction = XYZ(
+                                target_bl.X - curr_bl.X,
+                                target_bl.Y - curr_bl.Y,
+                                target_bl.Z - curr_bl.Z
+                            )
+                            tn.Coord = XYZ(tn.Coord.X + correction.X, tn.Coord.Y + correction.Y, tn.Coord.Z + correction.Z)
+                            print("    Right Seg {} -> level {}".format(seg_idx, level))
+                doc.Regenerate()
+    
+    # Copy positions to segments
+    count = 0
+    for seg in problem_segs:
+        if seg['index'] in textnotes_map:
+            tn = textnotes_map[seg['index']]
+            tn_bc = get_textnote_bottom_center(tn, view)
+            if tn_bc:
+                try:
+                    seg['segment'].TextPosition = tn_bc
+                    count += 1
+                except:
+                    pass
+    
+    doc.Regenerate()
+    
+    # Cleanup
+    for tn in textnotes_map.values():
+        try:
+            doc.Delete(tn.Id)
+        except:
+            pass
+    
+    return count
+
+
+def main():
+    av = doc.ActiveView
+    if not av:
+        forms.alert("No active view!", exitscript=True)
+        return
+    if av.ViewType == ViewType.ThreeD:
+        forms.alert("Not supported in 3D views.", exitscript=True)
+        return
+
+    if not get_user_params():
+        return
+
+    try:
+        refs = uidoc.Selection.PickObjects(ObjectType.Element, DimensionSelectionFilter(),
+                                           "Select dimensions. Press ESC when done.")
+    except:
+        print("Selection cancelled")
+        return
+    
+    if not refs:
+        forms.alert("No dimensions selected!", exitscript=True)
+        return
+
+    dims = [doc.GetElement(r) for r in refs]
+    print("\n" + "="*60)
+    print("Processing {} dimensions...".format(len(dims)))
+    print("="*60)
+    
+    t = Transaction(doc, "Auto Dimension Leaders v16")
+    t.Start()
+    
+    try:
+        total = 0
+        for idx, d in enumerate(dims):
+            print("\n" + "="*60)
+            print("DIMENSION {}/{} (ID: {})".format(idx+1, len(dims), d.Id))
+            print("="*60)
+            count = create_leaders_for_dimension(d, av)
+            total += count
+        
+        t.Commit()
+        
+        msg = "Successfully created {} leaders across {} dimensions".format(total, len(dims))
+        print("\n" + "="*60)
+        print(msg)
+        print("="*60)
+        forms.alert(msg, title="Done")
+        
+    except Exception as e:
+        t.RollBack()
+        error_msg = "Error: {}".format(e)
+        print("\n" + "="*60)
+        print("ERROR!")
+        print("="*60)
+        import traceback
+        print(traceback.format_exc())
+        forms.alert(error_msg, title="Error")
+
+if __name__ == "__main__":
+    try:
+        print("Starting script...")
+        main()
+    except Exception as e:
+        print("CRITICAL ERROR: {}".format(e))
+        import traceback
+        print(traceback.format_exc())
+        forms.alert("Critical error: {}".format(e), title="Error")
