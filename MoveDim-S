@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Auto-offset dimension texts on Sections - v1.2 Universal version
-SIMPLIFIED: Adapted working logic from MoveDim-H (Floor Plan) for Sections
-- Simplified dimension_axes() function
-- Added universal TextNote positioning helpers
-- Removed complex collision detection (caused issues)
-- Uses same proven logic as MoveDim-H"""
+"""Auto-offset dimension texts on Sections - v1.2.1 Bugfix release
+FIXED: Critical NameError from v1.2
+- Fixed: get_textnote_center_bottom -> get_textnote_bottom_center
+- Removed: Dead code after process_edge_zones_section
+- Verified: All function definitions match their calls
+Based on working logic from MoveDim-H (Floor Plan)"""
 
-__title__ = 'Align S-Dimension\nSections v1.2'
+__title__ = 'Align S-Dimension\nSections v1.2.1'
 __author__ = 'AB Scripts'
 
 from Autodesk.Revit.DB import *
@@ -614,13 +614,13 @@ def process_edge_zones_section(edge_zone_indices, edge_segments_moved, segs_sort
                 print("    Left zone Seg {} level {}: target=({:.2f},{:.2f},{:.2f})".format(
                     seg_idx, level, target_pos.X, target_pos.Y, target_pos.Z))
                 
-                curr_center = get_textnote_center_bottom(tn, view)
+                curr_center = get_textnote_bottom_center(tn, view)
                 if curr_center:
                     correction = target_pos - curr_center
                     tn.Coord = tn.Coord + correction
                     doc.Regenerate()
                     
-                    new_center = get_textnote_center_bottom(tn, view)
+                    new_center = get_textnote_bottom_center(tn, view)
                     if new_center:
                         seg = next(s for s in segs_sorted if s['index'] == seg_idx)
                         try:
@@ -647,13 +647,13 @@ def process_edge_zones_section(edge_zone_indices, edge_segments_moved, segs_sort
                 print("    Right zone Seg {} level {}: target=({:.2f},{:.2f},{:.2f})".format(
                     seg_idx, level, target_pos.X, target_pos.Y, target_pos.Z))
                 
-                curr_center = get_textnote_center_bottom(tn, view)
+                curr_center = get_textnote_bottom_center(tn, view)
                 if curr_center:
                     correction = target_pos - curr_center
                     tn.Coord = tn.Coord + correction
                     doc.Regenerate()
                     
-                    new_center = get_textnote_center_bottom(tn, view)
+                    new_center = get_textnote_bottom_center(tn, view)
                     if new_center:
                         seg = next(s for s in segs_sorted if s['index'] == seg_idx)
                         try:
@@ -672,36 +672,8 @@ def process_edge_zones_section(edge_zone_indices, edge_segments_moved, segs_sort
             doc.Delete(tn.Id)
         except:
             pass
-    
+
     return count
-    """Find best clean segment for placement - SECTION SPECIFIC"""
-    if not clean_segments:
-        return None
-    
-    prob_pos = problem_seg['text_pos']
-    
-    # Try to find clean segment that can fit the text
-    candidates = []
-    for clean in clean_segments:
-        if clean['value'] >= problem_seg.get('text_width', 0) * 0.8:
-            dist = abs((clean['text_pos'] - prob_pos).DotProduct(dim_dir))
-            candidates.append((dist, clean))
-    
-    if candidates:
-        candidates.sort(key=lambda x: x[0])
-        return candidates[0][1]
-    
-    # Fallback: nearest clean segment
-    best_clean = None
-    best_distance = float('inf')
-    
-    for clean in clean_segments:
-        dist = abs((clean['text_pos'] - prob_pos).DotProduct(dim_dir))
-        if dist < best_distance:
-            best_distance = dist
-            best_clean = clean
-    
-    return best_clean
 
 def process_with_clean_segments_section(problem_indices, clean_segments, segs_sorted, edge_segments_moved,
                                         dimension, view, vertical_offset, dim_dir, perp, textnote_type_id):
@@ -790,13 +762,13 @@ def process_with_clean_segments_section(problem_indices, clean_segments, segs_so
             print("    Left-Up Seg {} level {}: target=({:.2f},{:.2f},{:.2f})".format(
                 ps['index'], level, target_pos.X, target_pos.Y, target_pos.Z))
             
-            curr_center = get_textnote_center_bottom(tn, view)
+            curr_center = get_textnote_bottom_center(tn, view)
             if curr_center:
                 correction = target_pos - curr_center
                 tn.Coord = tn.Coord + correction
                 doc.Regenerate()
                 
-                new_center = get_textnote_center_bottom(tn, view)
+                new_center = get_textnote_bottom_center(tn, view)
                 if new_center:
                     try:
                         ps['segment'].TextPosition = new_center
@@ -815,13 +787,13 @@ def process_with_clean_segments_section(problem_indices, clean_segments, segs_so
             print("    Left-Down Seg {} level {}: target=({:.2f},{:.2f},{:.2f})".format(
                 ps['index'], level, target_pos.X, target_pos.Y, target_pos.Z))
             
-            curr_center = get_textnote_center_bottom(tn, view)
+            curr_center = get_textnote_bottom_center(tn, view)
             if curr_center:
                 correction = target_pos - curr_center
                 tn.Coord = tn.Coord + correction
                 doc.Regenerate()
                 
-                new_center = get_textnote_center_bottom(tn, view)
+                new_center = get_textnote_bottom_center(tn, view)
                 if new_center:
                     try:
                         ps['segment'].TextPosition = new_center
@@ -837,13 +809,13 @@ def process_with_clean_segments_section(problem_indices, clean_segments, segs_so
             tn = textnotes_map[ps['index']]
             target_pos = target_clean['text_pos'] + perp * (vertical_offset * level)
             
-            curr_center = get_textnote_center_bottom(tn, view)
+            curr_center = get_textnote_bottom_center(tn, view)
             if curr_center:
                 correction = target_pos - curr_center
                 tn.Coord = tn.Coord + correction
                 doc.Regenerate()
                 
-                new_center = get_textnote_center_bottom(tn, view)
+                new_center = get_textnote_bottom_center(tn, view)
                 if new_center:
                     try:
                         ps['segment'].TextPosition = new_center
@@ -866,13 +838,13 @@ def process_with_clean_segments_section(problem_indices, clean_segments, segs_so
             print("    Left Seg {} level {}: target=({:.2f},{:.2f},{:.2f})".format(
                 ps['index'], level, target_pos.X, target_pos.Y, target_pos.Z))
             
-            curr_center = get_textnote_center_bottom(tn, view)
+            curr_center = get_textnote_bottom_center(tn, view)
             if curr_center:
                 correction = target_pos - curr_center
                 tn.Coord = tn.Coord + correction
                 doc.Regenerate()
                 
-                new_center = get_textnote_center_bottom(tn, view)
+                new_center = get_textnote_bottom_center(tn, view)
                 if new_center:
                     try:
                         ps['segment'].TextPosition = new_center
@@ -894,13 +866,13 @@ def process_with_clean_segments_section(problem_indices, clean_segments, segs_so
             print("    Right Seg {} level {}: target=({:.2f},{:.2f},{:.2f})".format(
                 ps['index'], level, target_pos.X, target_pos.Y, target_pos.Z))
             
-            curr_center = get_textnote_center_bottom(tn, view)
+            curr_center = get_textnote_bottom_center(tn, view)
             if curr_center:
                 correction = target_pos - curr_center
                 tn.Coord = tn.Coord + correction
                 doc.Regenerate()
                 
-                new_center = get_textnote_center_bottom(tn, view)
+                new_center = get_textnote_bottom_center(tn, view)
                 if new_center:
                     try:
                         ps['segment'].TextPosition = new_center
@@ -964,7 +936,7 @@ def process_all_problems_section(problem_indices, edge_segments_moved, segs_sort
     if group1 and first_seg['index'] in edge_segments_moved:
         first_tn = textnotes_map.get(first_seg['index'])
         if first_tn:
-            ref_center = get_textnote_center_bottom(first_tn, view)
+            ref_center = get_textnote_bottom_center(first_tn, view)
             if ref_center:
                 print("  Group 1 reference center: ({:.2f},{:.2f},{:.2f})".format(
                     ref_center.X, ref_center.Y, ref_center.Z))
@@ -984,7 +956,7 @@ def process_all_problems_section(problem_indices, edge_segments_moved, segs_sort
                             offset_vector.X, offset_vector.Y, offset_vector.Z,
                             target_pos.X, target_pos.Y, target_pos.Z))
                         
-                        curr_center = get_textnote_center_bottom(tn, view)
+                        curr_center = get_textnote_bottom_center(tn, view)
                         if curr_center:
                             correction = target_pos - curr_center
                             tn.Coord = tn.Coord + correction
@@ -994,7 +966,7 @@ def process_all_problems_section(problem_indices, edge_segments_moved, segs_sort
     if group2 and last_seg['index'] in edge_segments_moved:
         last_tn = textnotes_map.get(last_seg['index'])
         if last_tn:
-            ref_center = get_textnote_center_bottom(last_tn, view)
+            ref_center = get_textnote_bottom_center(last_tn, view)
             if ref_center:
                 print("  Group 2 reference center: ({:.2f},{:.2f},{:.2f})".format(
                     ref_center.X, ref_center.Y, ref_center.Z))
@@ -1014,7 +986,7 @@ def process_all_problems_section(problem_indices, edge_segments_moved, segs_sort
                             offset_vector.X, offset_vector.Y, offset_vector.Z,
                             target_pos.X, target_pos.Y, target_pos.Z))
                         
-                        curr_center = get_textnote_center_bottom(tn, view)
+                        curr_center = get_textnote_bottom_center(tn, view)
                         if curr_center:
                             correction = target_pos - curr_center
                             tn.Coord = tn.Coord + correction
@@ -1025,7 +997,7 @@ def process_all_problems_section(problem_indices, edge_segments_moved, segs_sort
     for seg in problem_segs:
         if seg['index'] in textnotes_map:
             tn = textnotes_map[seg['index']]
-            tn_center = get_textnote_center_bottom(tn, view)
+            tn_center = get_textnote_bottom_center(tn, view)
             if tn_center:
                 try:
                     seg['segment'].TextPosition = tn_center
