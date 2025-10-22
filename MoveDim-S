@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Auto-offset dimension texts on Sections - v1.2.3 Stacking fix
-FIXED: Stack ALL segments even when only one edge moved
-- Fixed: process_all_problems_section now stacks all over first edge
-- Fixed: get_textnote_bottom_center uses CENTER Z not MIN Z for sections
-- Result: All segments stack properly above dimension line
-- No more Group 2 staying on dimension line
+"""Auto-offset dimension texts on Sections - v1.3 Balanced two-sided distribution
+FIXED: Split segments into TWO groups for balanced stacking like MoveDim-H
+- Fixed: Seg 0 lifted ABOVE dimension line by vertical_offset (no collision)
+- Fixed: Remaining segments split evenly into LEFT and RIGHT groups
+- Fixed: LEFT group stacks over lifted Seg 0
+- Fixed: RIGHT group stacks over midpoint anchor on dimension line
+- Result: Balanced distribution on both sides, no Seg 0 collision
 Based on working logic from MoveDim-H (Floor Plan)"""
 
-__title__ = 'Align S-Dimension\nSections v1.2.3'
+__title__ = 'Align S-Dimension\nSections v1.3'
 __author__ = 'AB Scripts'
 
 from Autodesk.Revit.DB import *
@@ -911,7 +912,10 @@ def process_with_clean_segments_section(problem_indices, clean_segments, segs_so
 def process_all_problems_section(problem_indices, edge_segments_moved, segs_sorted,
                                  dimension, view, vertical_offset, dim_dir, perp, textnote_type_id):
     """Process all problems - Universal for Plans and Sections
-    FIXED: Stack all segments even if only one edge was moved"""
+    FIXED v1.3: Split segments into TWO groups for balanced stacking
+    - Seg 0 lifted above dimension line
+    - Left group stacks over Seg 0
+    - Right group stacks separately (balanced distribution)"""
 
     all_problem_indices = set(problem_indices) | edge_segments_moved
     problem_segs = [s for s in segs_sorted if s['index'] in all_problem_indices]
@@ -945,77 +949,116 @@ def process_all_problems_section(problem_indices, edge_segments_moved, segs_sort
     print("  First edge (Seg {}) moved: {}".format(first_seg['index'], first_moved))
     print("  Last edge (Seg {}) moved: {}".format(last_seg['index'], last_moved))
 
-    # If NEITHER edge was moved, something is wrong
     if not first_moved and not last_moved:
         print("  WARNING: No edges moved, cannot stack!")
         return 0
 
-    # STRATEGY: Stack all segments over the first edge that was moved
-    # This works whether one or both edges were moved
-
+    # CRITICAL FIX: Lift Seg 0 ABOVE dimension line to avoid collision
     if first_moved:
-        # Use first edge as reference for ALL segments
         first_tn = textnotes_map.get(first_seg['index'])
         if first_tn:
-            ref_center = get_textnote_bottom_center(first_tn, view)
-            if ref_center:
-                print("  Stacking ALL segments over first edge")
-                print("  Reference center: ({:.2f},{:.2f},{:.2f})".format(
-                    ref_center.X, ref_center.Y, ref_center.Z))
-
-                # Stack all OTHER segments
-                level = 0
-                for seg in problem_segs:
-                    if seg['index'] == first_seg['index']:
-                        continue  # Skip the base segment
-
-                    if seg['index'] in textnotes_map:
-                        level += 1
-                        tn = textnotes_map[seg['index']]
-
-                        offset_vector = perp * (vertical_offset * level)
-                        target_pos = ref_center + offset_vector
-
-                        print("    Seg {} level {}: offset=({:.2f},{:.2f},{:.2f}) target=({:.2f},{:.2f},{:.2f})".format(
-                            seg['index'], level,
-                            offset_vector.X, offset_vector.Y, offset_vector.Z,
-                            target_pos.X, target_pos.Y, target_pos.Z))
-
-                        curr_center = get_textnote_bottom_center(tn, view)
-                        if curr_center:
-                            correction = target_pos - curr_center
-                            tn.Coord = tn.Coord + correction
-
+            current_center = get_textnote_bottom_center(first_tn, view)
+            if current_center:
+                # Move Seg 0 UP by vertical_offset to clear dimension line
+                lifted_pos = current_center + perp * vertical_offset
+                correction = lifted_pos - current_center
+                first_tn.Coord = first_tn.Coord + correction
                 doc.Regenerate()
 
-    elif last_moved:
-        # Fallback: use last edge if first wasn't moved
-        last_tn = textnotes_map.get(last_seg['index'])
-        if last_tn:
-            ref_center = get_textnote_bottom_center(last_tn, view)
-            if ref_center:
-                print("  Stacking ALL segments over last edge")
-                print("  Reference center: ({:.2f},{:.2f},{:.2f})".format(
-                    ref_center.X, ref_center.Y, ref_center.Z))
+                new_center = get_textnote_bottom_center(first_tn, view)
+                print("  Lifted Seg 0 above dimension line:")
+                print("    From: ({:.2f},{:.2f},{:.2f})".format(current_center.X, current_center.Y, current_center.Z))
+                print("    To:   ({:.2f},{:.2f},{:.2f})".format(new_center.X, new_center.Y, new_center.Z))
 
-                level = 0
-                for seg in reversed(problem_segs):
-                    if seg['index'] == last_seg['index']:
-                        continue
+    # STRATEGY: Split segments into TWO groups like MoveDim-H
+    # This gives balanced distribution instead of all in one direction
 
-                    if seg['index'] in textnotes_map:
-                        level += 1
-                        tn = textnotes_map[seg['index']]
+    # Get other segments (excluding edge that was moved)
+    other_segs = [s for s in problem_segs if s['index'] not in edge_segments_moved]
 
-                        offset_vector = perp * (vertical_offset * level)
-                        target_pos = ref_center + offset_vector
+    if not other_segs:
+        # Only edge segments, nothing to stack
+        pass
+    else:
+        # Sort by position along dimension line
+        other_sorted = [(s['index'], s['text_pos'].DotProduct(dim_dir)) for s in other_segs]
+        other_sorted.sort(key=lambda x: x[1])
 
-                        curr_center = get_textnote_bottom_center(tn, view)
-                        if curr_center:
-                            correction = target_pos - curr_center
-                            tn.Coord = tn.Coord + correction
+        # Split evenly by count (like MoveDim-H)
+        split_point = len(other_sorted) // 2
+        left_group = other_sorted[:split_point]
+        right_group = other_sorted[split_point:]
 
-                doc.Regenerate()
+        print("  Split: {} to left, {} to right".format(len(left_group), len(right_group)))
+        print("  Left group: {}".format([idx for idx, _ in left_group]))
+        print("  Right group: {}".format([idx for idx, _ in right_group]))
+
+        # Stack LEFT group over first edge (Seg 0)
+        if left_group and first_moved:
+            first_tn = textnotes_map.get(first_seg['index'])
+            if first_tn:
+                ref_center = get_textnote_bottom_center(first_tn, view)
+                if ref_center:
+                    print("  Stacking LEFT group over Seg 0")
+                    print("    Reference: ({:.2f},{:.2f},{:.2f})".format(
+                        ref_center.X, ref_center.Y, ref_center.Z))
+
+                    level = 0
+                    for seg_idx, _ in left_group:
+                        if seg_idx in textnotes_map:
+                            level += 1
+                            tn = textnotes_map[seg_idx]
+
+                            offset_vector = perp * (vertical_offset * level)
+                            target_pos = ref_center + offset_vector
+
+                            print("      Seg {} level {}: target=({:.2f},{:.2f},{:.2f})".format(
+                                seg_idx, level, target_pos.X, target_pos.Y, target_pos.Z))
+
+                            curr_center = get_textnote_bottom_center(tn, view)
+                            if curr_center:
+                                correction = target_pos - curr_center
+                                tn.Coord = tn.Coord + correction
+
+                    doc.Regenerate()
+
+        # Stack RIGHT group over their MIDPOINT on dimension line
+        if right_group:
+            # Calculate midpoint of right group along dimension line
+            right_positions_y = []
+            for seg_idx, pos_along_dim in right_group:
+                seg = next(s for s in segs_sorted if s['index'] == seg_idx)
+                right_positions_y.append(seg['text_pos'].Y)
+
+            mid_y = sum(right_positions_y) / len(right_positions_y)
+
+            # Create anchor point on dimension line at midpoint
+            # Use original Z (dimension line level) + vertical_offset
+            first_orig_z = segs_sorted[0]['text_pos'].Z
+            anchor_pos = XYZ(segs_sorted[0]['text_pos'].X, mid_y, first_orig_z + vertical_offset)
+
+            print("  Stacking RIGHT group over midpoint")
+            print("    Anchor: ({:.2f},{:.2f},{:.2f})".format(
+                anchor_pos.X, anchor_pos.Y, anchor_pos.Z))
+
+            level = 0
+            for seg_idx, _ in right_group:
+                if seg_idx in textnotes_map:
+                    level += 1
+                    tn = textnotes_map[seg_idx]
+
+                    offset_vector = perp * (vertical_offset * level)
+                    target_pos = anchor_pos + offset_vector
+
+                    print("      Seg {} level {}: target=({:.2f},{:.2f},{:.2f})".format(
+                        seg_idx, level, target_pos.X, target_pos.Y, target_pos.Z))
+
+                    curr_center = get_textnote_bottom_center(tn, view)
+                    if curr_center:
+                        correction = target_pos - curr_center
+                        tn.Coord = tn.Coord + correction
+
+            doc.Regenerate()
 
     # Copy positions to segments
     count = 0
